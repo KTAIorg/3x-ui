@@ -1,10 +1,9 @@
 name: Claude Issue Analyst
 
+# KT fork: 已中和触发器。依赖上游的 Claude 凭据与工作流约定，fork 上只会失败；
+# KT issue 分诊走 KTAIorg 自己的流程。
 on:
-  issues:
-    types: [opened]
-  issue_comment:
-    types: [created]
+  workflow_dispatch:
 
 permissions:
   contents: read

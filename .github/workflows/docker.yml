@@ -4,11 +4,10 @@ permissions:
   contents: read
   packages: write
 
+# KT fork: 已中和触发器（保留 workflow_dispatch）。推送目标是上游 Docker Hub（hsanaeii）
+# 与 ghcr.io/mhsanaei，fork 无对应凭据；KT 数据平面为裸机交付，不用容器镜像。
 on:
   workflow_dispatch:
-  push:
-    tags:
-      - "v*.*.*"
 
 jobs:
   build:

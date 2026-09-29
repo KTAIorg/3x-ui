@@ -1,10 +1,9 @@
 name: Claude PR Review
 
+# KT fork: 已中和触发器。pull_request_target 属安全敏感触发且依赖上游 Claude 凭据，
+# fork 上必失败；KT PR 评审走 KTAIorg 自己的流程。
 on:
-  issue_comment:
-    types: [created]
-  pull_request_target:
-    types: [opened, ready_for_review]
+  workflow_dispatch:
 
 permissions:
   contents: read

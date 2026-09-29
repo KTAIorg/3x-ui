@@ -4,9 +4,9 @@ name: Mutation testing
 # source and a surviving (LIVED) mutant means no test caught the change. It is SLOW, so it
 # runs nightly / on demand and scoped per package — never per-commit. It is informational:
 # no thresholds are set, so it reports survivors as artifacts without failing the build.
+# KT fork: 已中和每日定时（保留 workflow_dispatch）。低流量 fork 不值得每晚定时跑量；
+# 大版本同步后可手动跑一次作为测试质量参考。
 on:
-  schedule:
-    - cron: "0 3 * * *" # 03:00 UTC daily
   workflow_dispatch:
 
 permissions:

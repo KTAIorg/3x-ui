@@ -37,6 +37,23 @@
 
 安全修复以上游为准 > 上游已内建则收敛 KT 定制 > 白名单定制保留重施 > 纯风格以上游为准
 
+## KT 发布与版本标记
+
+- KT 发布 tag：`vX.Y.Z-kt.N`（如 `v3.8.5-kt.1`），其中 `vX.Y.Z` **必须是真实上游 release tag**
+- 发布流水线：`.github/workflows/release-vps.yml`（Release · VPS），内建血统断言不可绕过：
+  1. tag 格式匹配 `^v\d+\.\d+\.\d+-kt\.\d+$`
+  2. 对应上游 tag 在本 tag 祖先链中（从 MHSanaei/3x-ui 直拉的权威 tag 校验）
+  3. tag 打在 main 上（发布必经 PR，不允许旁路分支出包）
+- 产物：linux/amd64 静态完整包（x-ui 面板 + xray-core + geodata + tuic + mtg-multi，构建路径镜像上游 release.yml 的 amd64 分支）+ sha256
+- 消费：VPS Ansible 流水线按 tag 锁定拉取，**禁止浮动 latest**
+- 手动触发（workflow_dispatch）：跳过断言与发布，仅产出 workflow artifact 供试跑
+
+### 上游 workflow 在 fork 上的处置（触发器中和为 workflow_dispatch，保同步最小 diff）
+
+- 中和：`release.yml`（七平台+Windows 构建）、`docker.yml`（推上游 Docker Hub）、`docs-deploy.yml`（上游 Pages）、`mutation.yml`（每晚定时跑量）、`claude-issue-analyst.yml` / `claude-pr-review.yml`（上游 Claude 凭据 + pull_request_target 安全敏感）
+- 保留：`ci.yml`（PR 门禁）、`codeql.yml`（安全扫描）、`docs-ci.yml`（文档检查）、`cleanup_caches.yml`（缓存清理）
+- 同步冲突处置：上游改动上述 workflow 时，以"中和意图"优先，重新套用触发器中和再合入
+
 ## 验证清单（每次同步后）
 
 - [ ] build + test（Go 后端 + web 前端）
