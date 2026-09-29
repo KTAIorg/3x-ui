@@ -4,15 +4,9 @@ name: Docs Deploy (GitHub Pages)
 # settings (Source: GitHub Actions) and the docs.sanaei.dev custom domain
 # attached to this repository. The site URL defaults to the production domain in
 # docs/lib/shared.ts, so NEXT_PUBLIC_SITE_URL is optional.
+# KT fork: 已中和触发器（保留 workflow_dispatch）。上游 Pages 站点（docs.sanaei.dev）
+# 部署与 KT fork 无关，避免占用/覆盖 fork 的 Pages 配置。
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'docs/**'
-      - 'frontend/src/components/**'
-      - 'frontend/.storybook/**'
-      - 'frontend/package-lock.json'
-      - '.github/workflows/docs-deploy.yml'
   workflow_dispatch:
 
 permissions:

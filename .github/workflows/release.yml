@@ -1,24 +1,9 @@
 name: Release 3X-UI
 
+# KT fork: 已中和触发器（保留 workflow_dispatch）。上游 main-push 七平台+Windows 构建与
+# v*.*.* tag 触发在 fork 上只会空耗 runner 并与 KT 发布（release-vps.yml）冲突。
 on:
   workflow_dispatch:
-  # Only main (dev channel) and version tags ship binaries; build any other
-  # branch on demand via workflow_dispatch.
-  push:
-    branches:
-      - main
-    tags:
-      - "v*.*.*"
-    paths:
-      - "**.go"
-      - "go.mod"
-      - "go.sum"
-      - "**.sh"
-      - "frontend/**"
-      - "x-ui.service.debian"
-      - "x-ui.service.arch"
-      - "x-ui.service.rhel"
-      - ".github/workflows/release.yml"
 
 jobs:
   build:

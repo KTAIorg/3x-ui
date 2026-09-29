@@ -1,0 +1,178 @@
+# KT fork 发布流水线：linux/amd64 完整数据面包（x-ui 面板二进制 + xray-core + geodata + tuic + mtg-multi）。
+# 上游 release.yml 已中和（见其头部注释），KT 发布只走本文件。
+#
+# 版本标记：vX.Y.Z-kt.N（X.Y.Z 必须是真实上游 release tag），内建血统断言：
+#   1) tag 格式匹配；2) 对应上游 tag 在本 tag 祖先链中；3) tag 打在 main 上（发布必经 PR）。
+# 消费方：VPS Ansible 流水线按 tag 锁定拉取（拒绝浮动 latest），策略见 docs/development/upstream-sync-policy.md。
+#
+# Action 版本基线 2026-09-29：checkout@v7 / setup-go@v7 / setup-node@v7 / upload-artifact@v7
+# （与上游 release.yml 现行 pin 及 cicd-action-version-policy 2026-08-30 基线一致）。
+name: Release · VPS
+
+on:
+  push:
+    tags:
+      - "v*.*.*-kt.*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-vps
+  cancel-in-progress: false
+
+run-name: >-
+  Release · VPS | ${{ github.ref_type == 'tag' && github.ref_name || github.sha }}
+
+jobs:
+  build-release:
+    name: Build and publish (linux/amd64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # 断言需要完整历史（祖先链校验）
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          check-latest: true
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Assert KT tag lineage
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-kt\.[0-9]+$ ]]; then
+            echo "::error::tag ${TAG} 不匹配 KT 版本格式 vX.Y.Z-kt.N" >&2
+            exit 1
+          fi
+          UPSTREAM_TAG="${TAG%%-kt.*}"
+          echo "KT tag: ${TAG} → upstream base: ${UPSTREAM_TAG}"
+          git fetch --no-tags https://github.com/MHSanaei/3x-ui.git "refs/tags/${UPSTREAM_TAG}:refs/tags/upstream-base"
+          BASE_SHA=$(git rev-parse 'refs/tags/upstream-base^{commit}')
+          echo "upstream ${UPSTREAM_TAG} = ${BASE_SHA}"
+          if ! git merge-base --is-ancestor "$BASE_SHA" HEAD; then
+            echo "::error::上游 ${UPSTREAM_TAG} 不在本 tag 祖先链中——KT 发布必须基于真实上游 release tag" >&2
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor HEAD origin/main; then
+            echo "::error::本 tag 不在 main 祖先链中——KT 发布只能打在已合入 main 的提交上" >&2
+            exit 1
+          fi
+          echo "lineage OK: ${TAG} 基于 upstream ${UPSTREAM_TAG} 且已合入 main"
+
+      - name: Build frontend bundle
+        run: |
+          npm ci
+          npm run build
+        working-directory: frontend
+
+      - name: Build 3X-UI (static, musl) and package
+        run: |
+          set -euo pipefail
+          export CGO_ENABLED=1 GOOS=linux GOARCH=amd64
+          fetch() { wget -q --tries=5 --waitretry=10 --retry-on-http-error=429,500,502,503 "$@"; }
+
+          # 构建路径与上游 release.yml 的 amd64 分支保持一致（Bootlin musl 静态工具链）
+          BOOTLIN_ARCH="x86-64"
+          TARBALL_BASE="https://toolchains.bootlin.com/downloads/releases/toolchains/$BOOTLIN_ARCH/tarballs/"
+          TARBALL_URL=$(curl -fsSL --retry 5 --retry-all-errors --retry-delay 3 "$TARBALL_BASE" | grep -oE "${BOOTLIN_ARCH}--musl--stable-[^\"]+\\.tar\\.xz" | sort -r | head -n1)
+          [ -z "$TARBALL_URL" ] && { echo "Failed to locate Bootlin musl toolchain for arch=$BOOTLIN_ARCH" >&2; exit 1; }
+          echo "Downloading: $TARBALL_URL"
+          cd /tmp
+          curl -fL -sS --retry 5 --retry-all-errors --retry-delay 3 -o "$(basename "$TARBALL_URL")" "$TARBALL_BASE$TARBALL_URL"
+          tar -xf "$(basename "$TARBALL_URL")"
+          TOOLCHAIN_DIR=$(find . -maxdepth 1 -type d -name "${BOOTLIN_ARCH}--musl--stable-*" | head -n1)
+          export PATH="$(realpath "$TOOLCHAIN_DIR")/bin:$PATH"
+          export CC=$(realpath "$(find "$TOOLCHAIN_DIR/bin" -name '*-gcc.br_real' -type f -executable | head -n1)")
+          [ -z "$CC" ] && { echo "No gcc.br_real found in $TOOLCHAIN_DIR/bin" >&2; exit 1; }
+          cd -
+
+          # KT 只出 tag 稳定版，不 stamp dev commit（与上游口径一致，config.IsDevBuild() 保持 false）
+          LDFLAGS="-w -s -linkmode external -extldflags '-static'"
+          go build -buildvcs=true -ldflags "$LDFLAGS" -o xui-release -v .
+          file xui-release
+          ldd xui-release || echo "Static binary confirmed"
+
+          mkdir x-ui
+          cp xui-release x-ui/
+          cp x-ui.service.debian x-ui/
+          cp x-ui.service.arch x-ui/
+          cp x-ui.service.rhel x-ui/
+          cp x-ui.sh x-ui/
+          mv x-ui/xui-release x-ui/x-ui
+          mkdir x-ui/bin
+          cd x-ui/bin
+
+          # xray-core 版本随上游 release.yml 锁定（同步时随上游更新）
+          Xray_URL="https://github.com/XTLS/Xray-core/releases/download/v26.9.9/"
+          fetch ${Xray_URL}Xray-linux-64.zip
+          unzip Xray-linux-64.zip
+          rm -f Xray-linux-64.zip
+          rm -f geoip.dat geosite.dat
+          fetch https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat
+          fetch https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat
+          fetch -O geoip_IR.dat https://github.com/chocolate4u/Iran-v2ray-rules/releases/latest/download/geoip.dat
+          fetch -O geosite_IR.dat https://github.com/chocolate4u/Iran-v2ray-rules/releases/latest/download/geosite.dat
+          fetch -O geoip_RU.dat https://github.com/runetfreedom/russia-v2ray-rules-dat/releases/latest/download/geoip.dat
+          fetch -O geosite_RU.dat https://github.com/runetfreedom/russia-v2ray-rules-dat/releases/latest/download/geosite.dat
+          mv xray xray-linux-amd64
+
+          # mtg-multi（MTProto sidecar，upstream 同源）
+          MTG_MULTI_VER=$(curl -sf --retry 5 --retry-all-errors --retry-delay 3 -o /dev/null -w '%{redirect_url}' "https://github.com/mhsanaei/mtg-multi/releases/latest" | sed -n 's#.*/releases/tag/##p')
+          [ -z "$MTG_MULTI_VER" ] && { echo "could not resolve the latest mtg-multi release tag"; exit 1; }
+          MTG_PKG="mtg-multi-${MTG_MULTI_VER#v}-linux-amd64"
+          curl -sfLRO --retry 5 --retry-all-errors --retry-delay 3 "https://github.com/mhsanaei/mtg-multi/releases/download/${MTG_MULTI_VER}/${MTG_PKG}.tar.gz"
+          tar -xzf "${MTG_PKG}.tar.gz"
+          mv "${MTG_PKG}/mtg-multi" "mtg-linux-amd64"
+          rm -rf "${MTG_PKG}" "${MTG_PKG}.tar.gz"
+
+          # tuic（amd64）
+          curl -sfLRO --retry 5 --retry-all-errors --retry-delay 3 "https://github.com/EAimTY/tuic/releases/download/tuic-server-1.0.0/tuic-server-1.0.0-x86_64-unknown-linux-musl"
+          mv "tuic-server-1.0.0-x86_64-unknown-linux-musl" "tuic-server"
+          chmod +x "tuic-server"
+          cd ../..
+
+          tar -zcvf x-ui-linux-amd64.tar.gz x-ui
+          sha256sum x-ui-linux-amd64.tar.gz > x-ui-linux-amd64.tar.gz.sha256
+
+      - name: Upload workflow artifact (manual runs only)
+        if: "!startsWith(github.ref, 'refs/tags/')"
+        uses: actions/upload-artifact@v7
+        with:
+          name: x-ui-linux-amd64-manual
+          path: |
+            x-ui-linux-amd64.tar.gz
+            x-ui-linux-amd64.tar.gz.sha256
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          UPSTREAM_TAG="${TAG%%-kt.*}"
+          BASE_SHA=$(git rev-parse 'refs/tags/upstream-base^{commit}')
+          XRAY_VER=$(grep -oE 'Xray-core/releases/download/v[0-9.]+' .github/workflows/release-vps.yml | head -n1 | grep -oE 'v[0-9.]+$')
+          NOTES=$(cat <<EOF
+          KT 内部发布（VPN 数据平面，kt-vpn-control-plane#23）
+
+          - 上游基线：${UPSTREAM_TAG}（${BASE_SHA}）
+          - 本发布：${TAG}（零定制或白名单内定制，见 docs/development/upstream-sync-policy.md）
+          - 构建：linux/amd64 静态二进制（musl），xray-core ${XRAY_VER}（随上游 release.yml 锁定）
+          - 消费：VPS Ansible 流水线按本 tag 锁定拉取，禁止浮动 latest
+          EOF
+          )
+          gh release create "$TAG" --verify-tag --title "$TAG" --notes "$NOTES" \
+            x-ui-linux-amd64.tar.gz x-ui-linux-amd64.tar.gz.sha256
