@@ -190,24 +190,24 @@ def fmt_gb(n):
 
 
 def render_table(header, rows):
-    """等宽表格：Telegram 无表格标签，借 kt-agent-runtime markdown.go 的
-    wrapPipeTables 思路——包 <pre> 用空格对齐列，等宽字体下即成表格。
-    中文按 2 列宽计算对齐（Telegram 等宽字体 CJK 双宽）。"""
+    """等宽管线表格：与 kt-agent-runtime RenderMarkdownToTelegramHTML 的
+    wrapPipeTables 输出同构——保留 | 管道符 + 空格列对齐，包 <pre> 等宽渲染，
+    竖线即表格视觉。中文按 2 列宽计算对齐（CJK 双宽）。"""
     def width(s):
         return sum(2 if ord(ch) > 0x2E7F else 1 for ch in s)
 
-    def pad(s, w, left=False):
-        gap = w - width(s)
-        return " " * gap + s if left else s + " " * gap
+    def pad(s, w):
+        return s + " " * (w - width(s))
 
     widths = [width(h) for h in header]
     for row in rows:
         for i, cell in enumerate(row):
             widths[i] = max(widths[i], width(cell))
-    out = ["  ".join(pad(h, w) for h, w in zip(header, widths)),
-           "  ".join("-" * w for w in widths)]
+    def line(cells):
+        return "| " + " | ".join(pad(c, w) for c, w in zip(cells, widths)) + " |"
+    out = [line(header), "|" + "|".join("-" * (w + 2) for w in widths) + "|"]
     for row in rows:
-        out.append("  ".join(pad(c, w) for c, w in zip(row, widths)))
+        out.append(line(row))
     return "<pre>%s</pre>" % html.escape("\n".join(out), quote=False)
 
 
