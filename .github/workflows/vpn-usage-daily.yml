@@ -1,0 +1,100 @@
+# VPN 节点用量日报数字员工（3x-ui fork 承载，原 KTAIorg/kt-agent-skills kt-vpn-usage skill）
+# 链路：kt-tick 节律 vpn-usage-daily → kt-event-router 规则 ops.vpn-usage-daily → 本 workflow。
+# 纯 shell 执行，不走 LLM；GitHub-hosted runner，数据源全公网 API，不依赖自建机器。
+# 本仓为 public fork：节点清单（面板地址/VEID）不入库，由 secret VPN_NODES_JSON 注入。
+name: VPN Usage Daily
+
+on:
+  workflow_dispatch:
+    inputs:
+      trace_id: { description: "触发事件 trace_id（kt-event-collector envelope）", type: string, required: true }
+      mode: { description: "运行模式（report / dry-run）", type: string, default: "report" }
+
+permissions:
+  contents: read
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # ledger 跨轮持久化：runner 一次性，日增量依赖上一轮快照。
+      # 每轮写新 cache（key 含 run_id），restore-keys 回落取最近；被逐出则自愈为基线轮。
+      - name: Restore usage ledger
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.kt/vpn-usage
+          key: vpn-usage-ledger-${{ github.run_id }}
+          restore-keys: |
+            vpn-usage-ledger-
+
+      - name: Run VPN usage report
+        env:
+          VPN_NODES_JSON: ${{ secrets.VPN_NODES_JSON }}
+          VPN_PANEL_USER: ${{ secrets.VPN_PANEL_USER }}
+          VPN_PANEL_PASS: ${{ secrets.VPN_PANEL_PASS }}
+          KIWIVM_API_KEY: ${{ secrets.KIWIVM_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+        run: |
+          set +x
+          ARGS=""
+          if [ "${{ inputs.mode }}" = "dry-run" ]; then ARGS="--dry-run"; fi
+          python3 ops/vpn-usage/vpn-usage-report.py $ARGS | tee vpn-usage.log
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: vpn-usage-log
+          path: vpn-usage.log
+          retention-days: 30
+          if-no-files-found: ignore
+
+      # 执行结果回写：向 kt-event-collector POST kt.system.tick_result。
+      # 铁律：不影响 job 成败——未配 token 或 collector 不可达一律静默跳过。
+      - name: Emit tick_result to kt-event-collector
+        if: always()
+        env:
+          COLLECTOR_WRITE_TOKEN: ${{ secrets.COLLECTOR_WRITE_TOKEN }}
+          COLLECTOR_URL: ${{ vars.COLLECTOR_URL || 'https://events.kt8899.org' }}
+          TRACE_ID: ${{ inputs.trace_id }}
+          CONCLUSION: ${{ job.status }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set +e
+          if [ -z "${COLLECTOR_WRITE_TOKEN:-}" ]; then
+            echo "::notice::COLLECTOR_WRITE_TOKEN 未配置，跳过 tick_result 回写"
+            exit 0
+          fi
+          OCCURRED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          export OCCURRED_AT
+          BODY=$(python3 -c 'import json, os
+          print(json.dumps({
+              "event_id": "evt-" + os.environ["GITHUB_RUN_ID"] + "-" + os.environ["GITHUB_RUN_ATTEMPT"],
+              "trace_id": os.environ["TRACE_ID"],
+              "event_type": "kt.system.tick_result",
+              "tenant_id": "kt",
+              "subject": {"type": "workflow", "id": "workflow:cron-vpn-usage-daily"},
+              "occurred_at": os.environ["OCCURRED_AT"],
+              "payload": {
+                  "cron_id": "vpn-usage-daily",
+                  "trace_id": os.environ["TRACE_ID"],
+                  "conclusion": os.environ["CONCLUSION"],
+                  "run_url": os.environ["RUN_URL"],
+              },
+          }))')
+          if ! CODE=$(curl --max-time 15 -sS -o /tmp/emit_resp.json -w '%{http_code}' \
+            -X POST "${COLLECTOR_URL}/api/events" \
+            -H "Authorization: Bearer ${COLLECTOR_WRITE_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "$BODY"); then
+            echo "::warning::collector 不可达（${COLLECTOR_URL}），跳过 tick_result 回写"
+            exit 0
+          fi
+          if [ "$CODE" != "200" ] && [ "$CODE" != "201" ]; then
+            echo "::warning::collector 返回 HTTP ${CODE}：$(head -c 500 /tmp/emit_resp.json 2>/dev/null)"
+            exit 0
+          fi
+          echo "tick_result 已回写: http=${CODE} resp=$(cat /tmp/emit_resp.json)"
