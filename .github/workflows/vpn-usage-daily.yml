@@ -93,7 +93,7 @@ jobs:
             echo "::warning::collector 不可达（${COLLECTOR_URL}），跳过 tick_result 回写"
             exit 0
           fi
-          if [ "$CODE" != "200" ]; then
+          if [ "$CODE" != "200" ] && [ "$CODE" != "201" ]; then
             echo "::warning::collector 返回 HTTP ${CODE}：$(head -c 500 /tmp/emit_resp.json 2>/dev/null)"
             exit 0
           fi
