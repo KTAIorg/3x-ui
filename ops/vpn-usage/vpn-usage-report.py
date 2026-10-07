@@ -341,9 +341,11 @@ def html_to_markdown(text):
             in_pre = False
             content = unescape("".join(pre_buf))
             pre_buf = []
-            # 管线表格透传给原生渲染；非表格 pre 内容退回围栏代码块
+            # 管线表格透传给原生渲染；非表格 pre 内容退回围栏代码块。
+            # 表格前后必须空行分隔：否则 markdown 解析器按软换行把表格并进
+            # 前一段 paragraph，管道符原样输出不渲染成 table 块（实测探针确认）。
             if content.lstrip().startswith("|"):
-                out.append(content)
+                out.append("\n%s\n" % content)
             else:
                 out.append("```\n%s\n```" % content)
             i += 6
@@ -368,7 +370,8 @@ def html_to_markdown(text):
         else:
             out.append(text[i])
             i += 1
-    return unescape("".join(out))
+    md = unescape("".join(out))
+    return re.sub(r"\n{3,}", "\n\n", md)
 
 
 def send_telegram(token, chat_id, text):
