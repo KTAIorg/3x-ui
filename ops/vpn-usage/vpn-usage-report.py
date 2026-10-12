@@ -190,24 +190,24 @@ def fmt_gb(n):
 
 
 def render_table(header, rows):
-    """等宽表格：Telegram 无表格标签，借 kt-agent-runtime markdown.go 的
-    wrapPipeTables 思路——包 <pre> 用空格对齐列，等宽字体下即成表格。
-    中文按 2 列宽计算对齐（Telegram 等宽字体 CJK 双宽）。"""
+    """等宽管线表格：与 kt-agent-runtime RenderMarkdownToTelegramHTML 的
+    wrapPipeTables 输出同构——保留 | 管道符 + 空格列对齐，包 <pre> 等宽渲染，
+    竖线即表格视觉。中文按 2 列宽计算对齐（CJK 双宽）。"""
     def width(s):
         return sum(2 if ord(ch) > 0x2E7F else 1 for ch in s)
 
-    def pad(s, w, left=False):
-        gap = w - width(s)
-        return " " * gap + s if left else s + " " * gap
+    def pad(s, w):
+        return s + " " * (w - width(s))
 
     widths = [width(h) for h in header]
     for row in rows:
         for i, cell in enumerate(row):
             widths[i] = max(widths[i], width(cell))
-    out = ["  ".join(pad(h, w) for h, w in zip(header, widths)),
-           "  ".join("-" * w for w in widths)]
+    def line(cells):
+        return "| " + " | ".join(pad(c, w) for c, w in zip(cells, widths)) + " |"
+    out = [line(header), "|" + "|".join("-" * (w + 2) for w in widths) + "|"]
     for row in rows:
-        out.append("  ".join(pad(c, w) for c, w in zip(row, widths)))
+        out.append(line(row))
     return "<pre>%s</pre>" % html.escape("\n".join(out), quote=False)
 
 
@@ -322,7 +322,72 @@ def build_report(now, nodes_results, prev_map, daily_warn_gb, month_warn_pct):
     return "\n".join(lines), alerts
 
 
+def html_to_markdown(text):
+    """把 build_report 的 Telegram HTML 子集转回富文本 markdown：
+    <b>→**、<i>→*、<code>/<pre>→`/```。表格 <pre> 内容本就是管线 markdown，
+    转围栏代码块外的处理：sendRichMessage 的 markdown 原生渲染管线表格，
+    故 <pre> 内的管线表格去掉围栏直接透传。动态字段已在源端转义过，
+    此处反转义回纯文本。"""
+    def unescape(s):
+        return s.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
+
+    out, i = [], 0
+    pre_buf, in_pre = [], False
+    while i < len(text):
+        if text.startswith("<pre>", i):
+            in_pre = True
+            i += 5
+        elif text.startswith("</pre>", i):
+            in_pre = False
+            content = unescape("".join(pre_buf))
+            pre_buf = []
+            # 管线表格透传给原生渲染；非表格 pre 内容退回围栏代码块。
+            # 表格前后必须空行分隔：否则 markdown 解析器按软换行把表格并进
+            # 前一段 paragraph，管道符原样输出不渲染成 table 块（实测探针确认）。
+            if content.lstrip().startswith("|"):
+                out.append("\n%s\n" % content)
+            else:
+                out.append("```\n%s\n```" % content)
+            i += 6
+        elif in_pre:
+            pre_buf.append(text[i])
+            i += 1
+        elif text.startswith("<b>", i):
+            out.append("**"); i += 3
+        elif text.startswith("</b>", i):
+            out.append("**"); i += 4
+        elif text.startswith("<i>", i):
+            out.append("*"); i += 3
+        elif text.startswith("</i>", i):
+            out.append("*"); i += 4
+        elif text.startswith("<code>", i):
+            out.append("`"); i += 6
+        elif text.startswith("</code>", i):
+            out.append("`"); i += 7
+        elif text[i] == "<":
+            j = text.find(">", i)
+            i = len(text) if j < 0 else j + 1  # 丢弃其余未知标签
+        else:
+            out.append(text[i])
+            i += 1
+    md = unescape("".join(out))
+    return re.sub(r"\n{3,}", "\n\n", md)
+
+
 def send_telegram(token, chat_id, text):
+    """优先 Bot API sendRichMessage（markdown 原生表格渲染，同 kt-agent-runtime
+    lib/telegram/rich.go 链路）；群不支持时回落 sendMessage+HTML。"""
+    url = "https://api.telegram.org/bot%s/sendRichMessage" % token
+    md = html_to_markdown(text)
+    status, obj = http_json(url, method="POST", body={
+        "chat_id": chat_id, "rich_message": {"markdown": md[:3900]},
+    })
+    if obj.get("ok"):
+        return status
+    # 回落：sendRichMessage 不被支持（description 含 method not found / not supported）
+    err = str(obj.get("description", "")).lower()
+    if "method" not in err and "not found" not in err:
+        raise RuntimeError("telegram sendRichMessage failed: %s" % obj)
     url = "https://api.telegram.org/bot%s/sendMessage" % token
     status, obj = http_json(url, method="POST", body={
         "chat_id": chat_id, "text": text[:3900],
